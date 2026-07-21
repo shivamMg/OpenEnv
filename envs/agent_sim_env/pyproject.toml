@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openenv-agent-sim-env"
+version = "0.1.0"
+description = "Trace-derived retail customer-service agent simulator for OpenEnv"
+requires-python = ">=3.10"
+dependencies = ["openenv>=0.3.1", "fastapi>=0.115.0", "pydantic>=2.0.0", "rouge-score>=0.1.2", "uvicorn>=0.24.0"]
+
+[project.optional-dependencies]
+dev = ["openai>=1.0.0", "pytest>=8.0.0"]
+generator = ["openai>=1.0.0"]
+
+[project.scripts]
+server = "agent_sim_env.server.app:main"
+agent-sim-server = "agent_sim_env.server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["agent_sim_env", "agent_sim_env.scripts", "agent_sim_env.server", "agent_sim_env.server.graders"]
+package-dir = { "agent_sim_env" = ".", "agent_sim_env.scripts" = "scripts", "agent_sim_env.server" = "server", "agent_sim_env.server.graders" = "server/graders" }
+
+[tool.setuptools.package-data]
+agent_sim_env = ["data/*.db", "data/*.json", "openenv.yaml"]
