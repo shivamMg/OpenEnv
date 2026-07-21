@@ -2,7 +2,7 @@
 
 `agent_sim_env` turns Agent Traces into a stateful OpenEnv simulation.
 `SimGenerator` creates one task per source conversation, a semantic SQLite store, a
-SQLite-backed tool dispatcher, a global policy grader, and terminal database
+SQLite-backed tool caller, a global policy grader, and terminal database
 graders. Runtime serving does not call an LLM.
 
 Generated artifacts are deliberately server-only:
@@ -10,7 +10,7 @@ Generated artifacts are deliberately server-only:
 ```text
 data/tasks.json                 # tasks, expert actions, terminal grader code
 data/store.db                   # immutable baseline relational state
-server/tools.py                 # generated SQLite-backed tool dispatcher
+server/tools.py                 # generated SQLite-backed tool caller
 server/graders/policy.py        # generated global policy grader
 ```
 
@@ -45,8 +45,7 @@ $$
 
 The current unmatched expert action is graded first. If it scores zero, the
 environment searches later unmatched actions of the same type and applies a
-0.5 out-of-order shaping penalty. Tool calls match at $0.8$; text messages
-match at $0.6$. Episodes end after every expert action is matched or the
+0.5 out-of-order shaping penalty. Threshold for Tool calls match is $0.8$ and for Text messages match is $0.6$. Episodes end after every expert action is matched or the
 environment-level `MAX_STEPS` limit is reached.
 
 ## Generate artifacts

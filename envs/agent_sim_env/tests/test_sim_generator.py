@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import sqlite3
 from pathlib import Path
@@ -124,15 +122,18 @@ def test_generator_emits_one_task_semantic_store_and_tools(tmp_path: Path) -> No
         },
         {
             "tools_code": """
-from __future__ import annotations
 import sqlite3
 
-def call_tool(db_path, tool_name, arguments):
-    if tool_name != "find_order":
-        return {"error": "Unknown tool"}
-    with sqlite3.connect(db_path) as connection:
-        row = connection.execute("SELECT order_id, status FROM orders WHERE order_id = ?", (arguments["order_id"],)).fetchone()
-    return {"order_id": row[0], "status": row[1]} if row else {"error": "Order not found"}
+class Tools:
+    def __init__(self, db_path):
+        self._db_path = db_path
+
+    def call(self, name, arguments):
+        if name != "find_order":
+            return {"error": "Unknown tool"}
+        with sqlite3.connect(self._db_path) as connection:
+            row = connection.execute("SELECT order_id, status FROM orders WHERE order_id = ?", (arguments["order_id"],)).fetchone()
+        return {"order_id": row[0], "status": row[1]} if row else {"error": "Order not found"}
 """,
         },
         {

@@ -1,7 +1,5 @@
 """Online tool-call similarity grading."""
 
-from __future__ import annotations
-
 import json
 from collections import Counter
 from typing import Any

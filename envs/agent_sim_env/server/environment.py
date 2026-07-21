@@ -1,7 +1,5 @@
 """Runtime for generated, trace-derived customer-service simulations."""
 
-from __future__ import annotations
-
 import copy
 import importlib
 import json
@@ -9,7 +7,7 @@ import shutil
 import sqlite3
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Protocol, cast
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
@@ -52,7 +50,15 @@ TOOL_MATCH_THRESHOLD = 0.8
 TEXT_MATCH_THRESHOLD = 0.6
 WEIGHTS = {"final_state": 0.6, "tool_call": 0.2, "text_message": 0.1, "policy": 0.1}
 
-ToolDispatcher = Callable[[str | Path, str, dict[str, Any]], Any]
+
+class ToolCaller(Protocol):
+    """Execute generated tools against an episode-specific database."""
+
+    def call(self, name: str, arguments: dict[str, Any]) -> Any:
+        """Invoke a named tool."""
+
+
+ToolsFactory = Callable[[str | Path], ToolCaller]
 
 
 class AgentSimEnvironment(
@@ -66,7 +72,7 @@ class AgentSimEnvironment(
         self,
         *,
         data_dir: Path = DATA_DIR,
-        tool_dispatcher: ToolDispatcher | None = None,
+        tools_factory: ToolsFactory | None = None,
         policy_grader: PolicyGrader | None = None,
     ) -> None:
         self._data_dir = data_dir
@@ -79,7 +85,8 @@ class AgentSimEnvironment(
         payload = json.loads(tasks_path.read_text(encoding="utf-8"))
         self._tasks = payload["tasks"]
         self._store_path = store_path
-        self._tool_dispatcher = tool_dispatcher or self._load_tool_dispatcher()
+        self._tools_factory = tools_factory or self._load_tools_factory()
+        self._tools: ToolCaller | None = None
         self._policy_grader = policy_grader or PolicyGrader()
         self._tool_grader = ToolCallGrader()
         self._text_grader = TextMessageGrader()
@@ -115,6 +122,7 @@ class AgentSimEnvironment(
         self._live_db_path = self._session_dir / "live.db"
         self._copy_database(self._store_path, self._initial_db_path)
         self._copy_database(self._store_path, self._live_db_path)
+        self._tools = self._tools_factory(self._live_db_path)
         self._messages = copy.deepcopy(self._task["initial_messages"])
         self._latest_tool_result = None
         self._matched_action_indices = set()
@@ -146,8 +154,9 @@ class AgentSimEnvironment(
             self._matched_action_indices.add(candidate_index)
 
         if isinstance(action, ToolCallAction):
-            self._latest_tool_result = self._tool_dispatcher(
-                str(self._live_db_path), action.tool_name, action.arguments
+            assert self._tools is not None
+            self._latest_tool_result = self._tools.call(
+                action.tool_name, action.arguments
             )
             self._messages.append(
                 {
@@ -188,6 +197,7 @@ class AgentSimEnvironment(
         if self._session_dir is not None:
             shutil.rmtree(self._session_dir, ignore_errors=True)
         self._session_dir = self._initial_db_path = self._live_db_path = None
+        self._tools = None
 
     def _grade_against_experts(
         self, action: TextMessage | ToolCallAction
@@ -297,12 +307,12 @@ class AgentSimEnvironment(
             reward=reward,
         )
 
-    def _load_tool_dispatcher(self) -> ToolDispatcher:
+    def _load_tools_factory(self) -> ToolsFactory:
         module = importlib.import_module("agent_sim_env.server.tools")
-        dispatcher = getattr(module, "call_tool", None)
-        if not callable(dispatcher):
-            raise RuntimeError("Generated server/tools.py must define call_tool()")
-        return dispatcher
+        tools_class = getattr(module, "Tools", None)
+        if not callable(tools_class):
+            raise RuntimeError("Generated server/tools.py must define a Tools class")
+        return cast(ToolsFactory, tools_class)
 
     @staticmethod
     def _copy_database(source: Path, target: Path) -> None:

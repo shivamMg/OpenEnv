@@ -4,8 +4,6 @@
 runtime wrapper.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from .runner import execute_code, GradeResult

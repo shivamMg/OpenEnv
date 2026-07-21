@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import sqlite3
 from pathlib import Path
@@ -50,18 +48,22 @@ def _artifacts(tmp_path: Path) -> Path:
     return data_dir
 
 
-def _tools(db_path: str, tool_name: str, arguments: dict[str, str]) -> dict[str, bool]:
-    if tool_name != "complete_job" or arguments.get("id") != "1":
-        return {"success": False}
-    with sqlite3.connect(db_path) as connection:
-        connection.execute("UPDATE jobs SET completed = 1 WHERE id = '1'")
-    return {"success": True}
+class FakeTools:
+    def __init__(self, db_path: str | Path) -> None:
+        self._db_path = db_path
+
+    def call(self, name: str, arguments: dict[str, str]) -> dict[str, bool]:
+        if name != "complete_job" or arguments.get("id") != "1":
+            return {"success": False}
+        with sqlite3.connect(self._db_path) as connection:
+            connection.execute("UPDATE jobs SET completed = 1 WHERE id = '1'")
+        return {"success": True}
 
 
 def test_terminal_reward_combines_generated_final_state_and_step_graders(
     tmp_path: Path,
 ) -> None:
-    env = AgentSimEnvironment(data_dir=_artifacts(tmp_path), tool_dispatcher=_tools)
+    env = AgentSimEnvironment(data_dir=_artifacts(tmp_path), tools_factory=FakeTools)
     env.reset(task_id="task-1")
 
     tool_observation = env.step(
@@ -75,7 +77,7 @@ def test_terminal_reward_combines_generated_final_state_and_step_graders(
 
 
 def test_out_of_order_action_is_matched_with_a_penalty(tmp_path: Path) -> None:
-    env = AgentSimEnvironment(data_dir=_artifacts(tmp_path), tool_dispatcher=_tools)
+    env = AgentSimEnvironment(data_dir=_artifacts(tmp_path), tools_factory=FakeTools)
     env.reset(task_id="task-1")
 
     observation = env.step(TextMessage(content="The job is complete."))
@@ -85,7 +87,7 @@ def test_out_of_order_action_is_matched_with_a_penalty(tmp_path: Path) -> None:
 
 
 def test_reset_does_not_leak_expert_actions_or_code(tmp_path: Path) -> None:
-    env = AgentSimEnvironment(data_dir=_artifacts(tmp_path), tool_dispatcher=_tools)
+    env = AgentSimEnvironment(data_dir=_artifacts(tmp_path), tools_factory=FakeTools)
 
     observation = env.reset(task_id="task-1")
 

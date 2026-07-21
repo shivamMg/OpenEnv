@@ -1,7 +1,5 @@
 """Typed contracts for the trace-derived retail-agent simulator."""
 
-from __future__ import annotations
-
 from typing import Annotated, Any, Literal
 
 from openenv.core.env_server.types import Action, Observation, State

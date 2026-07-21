@@ -1,7 +1,5 @@
 """Child-process entry point for generated grader functions."""
 
-from __future__ import annotations
-
 import builtins
 import json
 import sys

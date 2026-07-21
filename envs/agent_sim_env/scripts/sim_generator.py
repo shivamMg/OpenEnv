@@ -4,8 +4,6 @@ The generator intentionally keeps Azure OpenAI behind an injected client so test
 can use a deterministic fake and serving generated artifacts needs no credentials.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -49,9 +47,9 @@ class SimGenerator:
         )
         tools = self._ask_json(
             "Generate Python source for a semantic SQLite tool dispatcher. It must define "
-            "call_tool(db_path, tool_name, arguments), use parameterized SQLite queries, "
-            "perform mutations transactionally, and return JSON-compatible values. Return "
-            "JSON with tools_code only.",
+            "a Tools class whose __init__(db_path) stores the SQLite database path and whose "
+            "call(name, arguments) method uses parameterized SQLite queries, performs mutations "
+            "transactionally, and returns JSON-compatible values. Return JSON with tools_code only.",
             {"tool_definitions": self._tool_definitions(tasks), "schema": schema},
         )
         for task in tasks:
@@ -194,7 +192,7 @@ class SimGenerator:
                 encoding="utf-8",
             )
             tools_code = self._required_string(tools, "tools_code")
-            self._validate_python(tools_code, "call_tool")
+            self._validate_python(tools_code, "Tools")
             (root / "server" / "tools.py").write_text(tools_code, encoding="utf-8")
             policy_code = self._required_string(policy, "code")
             self._validate_python(policy_code, "grade")
@@ -253,8 +251,8 @@ class SimGenerator:
         tools_path = root / "server" / "tools.py"
         namespace: dict[str, Any] = {}
         exec(tools_path.read_text(encoding="utf-8"), namespace)  # noqa: S102 - generated validation
-        if not callable(namespace.get("call_tool")):
-            raise ValueError("generated tools.py must define call_tool")
+        if not callable(namespace.get("Tools")):
+            raise ValueError("generated tools.py must define a Tools class")
         for example in examples:
             temporary_store = root / "validation.db"
             self._copy_database(root / "data" / "store.db", temporary_store)
@@ -299,7 +297,8 @@ payload = json.loads(sys.stdin.read())
 spec = importlib.util.spec_from_file_location("generated_tools", payload["tools_path"])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-result = module.call_tool(payload["db_path"], payload["tool_name"], payload["arguments"])
+tools = module.Tools(payload["db_path"])
+result = tools.call(payload["tool_name"], payload["arguments"])
 print(json.dumps(result))
 """
         payload = {
@@ -359,8 +358,6 @@ print(json.dumps(result))
     @staticmethod
     def _render_policy_module(code: str) -> str:
         return f'''"""Generated global policy grader. Do not edit manually."""
-
-from __future__ import annotations
 
 from typing import Any
 

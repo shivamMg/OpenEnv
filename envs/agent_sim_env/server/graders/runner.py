@@ -5,8 +5,6 @@ hostile Python. It uses a separate interpreter, a strict JSON protocol, a wall
 clock timeout, and POSIX resource limits when available.
 """
 
-from __future__ import annotations
-
 import json
 import os
 import subprocess
