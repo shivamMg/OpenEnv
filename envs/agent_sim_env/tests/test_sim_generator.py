@@ -2,7 +2,9 @@ import json
 import sqlite3
 from pathlib import Path
 
+from agent_sim_env.scripts import sim_generator
 from agent_sim_env.scripts.sim_generator import SimGenerator
+from pytest import MonkeyPatch
 
 
 class FakeCompletions:
@@ -33,6 +35,28 @@ class FakeCompletions:
 class FakeAzureOpenAI:
     def __init__(self, responses: list[dict[str, object]]) -> None:
         self.chat = type("Chat", (), {"completions": FakeCompletions(responses)})()
+
+
+def test_load_generator_env_reads_dotenv_without_overriding_environment(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "AZURE_OPENAI_ENDPOINT=https://from-dotenv.example\n"
+        "AZURE_OPENAI_DEPLOYMENT=dotenv-deployment\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sim_generator, "ENV_FILE", env_file)
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://from-environment.example")
+    monkeypatch.delenv("AZURE_OPENAI_DEPLOYMENT", raising=False)
+
+    sim_generator.load_generator_env()
+
+    assert (
+        sim_generator.os.environ["AZURE_OPENAI_ENDPOINT"]
+        == "https://from-environment.example"
+    )
+    assert sim_generator.os.environ["AZURE_OPENAI_DEPLOYMENT"] == "dotenv-deployment"
 
 
 def _trace() -> dict[str, object]:
@@ -180,3 +204,81 @@ def grade(system_prompt, action, messages, latest_tool_result):
         )
     assert (output / "server" / "tools.py").exists()
     assert (output / "server" / "graders" / "policy.py").exists()
+
+
+def test_generator_repairs_semantic_artifacts_that_fail_replay(tmp_path: Path) -> None:
+    trace_path = tmp_path / "traces.jsonl"
+    trace_path.write_text(json.dumps(_trace()) + "\n", encoding="utf-8")
+    broken_tools = {
+        "tools_code": """
+class Tools:
+    def __init__(self, db_path):
+        self._db_path = db_path
+
+    def call(self, name, arguments):
+        return {"order_id": arguments["order_id"], "status": "wrong"}
+"""
+    }
+    valid_schema = {
+        "schema_sql": "CREATE TABLE orders (order_id TEXT PRIMARY KEY, status TEXT NOT NULL);",
+        "seed_rows": [
+            {"table": "orders", "values": {"order_id": "A1", "status": "pending"}}
+        ],
+    }
+    valid_tools = {
+        "tools_code": """
+import sqlite3
+
+class Tools:
+    def __init__(self, db_path):
+        self._db_path = db_path
+
+    def call(self, name, arguments):
+        with sqlite3.connect(self._db_path) as connection:
+            row = connection.execute(
+                "SELECT order_id, status FROM orders WHERE order_id = ?",
+                (arguments["order_id"],),
+            ).fetchone()
+        return {"order_id": row[0], "status": row[1]}
+"""
+    }
+    final_grader = {
+        "code": """
+def grade(initial_db_path, final_db_path, task):
+    return {"reward": 1.0, "reason": "verified"}
+"""
+    }
+    policy_grader = {
+        "code": """
+def grade(system_prompt, action, messages, latest_tool_result):
+    return {"reward": 1.0, "reason": "policy followed"}
+"""
+    }
+    llm = FakeAzureOpenAI(
+        [
+            valid_schema,
+            broken_tools,
+            valid_schema,
+            valid_tools,
+            final_grader,
+            policy_grader,
+        ]
+    )
+
+    output = tmp_path / "output"
+    SimGenerator(
+        traces_dir=tmp_path,
+        output_dir=output,
+        llm=llm,
+        deployment="test-deployment",
+    ).generate()
+
+    with sqlite3.connect(output / "data" / "store.db") as connection:
+        assert connection.execute("SELECT status FROM orders").fetchone() == (
+            "pending",
+        )
+    assert (output / "server" / "tools.py").exists()
+
+
+def test_replay_validation_ignores_float_representation_noise() -> None:
+    assert SimGenerator._response_differences(21.57, 21.569999999999993) == []

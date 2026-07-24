@@ -1644,6 +1644,7 @@ dev = [
 ]
 generator = [
     { name = "openai" },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
@@ -1654,6 +1655,7 @@ requires-dist = [
     { name = "openenv", specifier = ">=0.3.1" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+    { name = "python-dotenv", marker = "extra == 'generator'", specifier = ">=1.0.0" },
     { name = "rouge-score", specifier = ">=0.1.2" },
     { name = "uvicorn", specifier = ">=0.24.0" },
 ]

@@ -50,13 +50,19 @@ environment-level `MAX_STEPS` limit is reached.
 
 ## Generate artifacts
 
-Install generator dependencies and set Azure OpenAI values:
+Install generator dependencies and save Azure OpenAI values in
+`envs/agent_sim_env/.env` (shell environment values take precedence):
 
 ```bash
-export AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com/"
-export AZURE_OPENAI_DEPLOYMENT="<deployment>"
-export AZURE_OPENAI_API_KEY="<key>"
-export AZURE_OPENAI_API_VERSION="2024-10-21"
+AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com/"
+AZURE_OPENAI_DEPLOYMENT="<deployment>"
+AZURE_OPENAI_API_KEY="<key>"
+AZURE_OPENAI_API_VERSION="2024-10-21"
+```
+
+Then run:
+
+```bash
 uv run --extra generator python -m agent_sim_env.scripts.sim_generator \
 	--traces-dir envs/agent_sim_env/traces \
 	--output-dir envs/agent_sim_env

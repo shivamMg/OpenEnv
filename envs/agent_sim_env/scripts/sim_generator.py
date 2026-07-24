@@ -16,6 +16,17 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
+
+ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+MAX_SEMANTIC_GENERATION_ATTEMPTS = 5
+
+
+def load_generator_env() -> None:
+    """Load generator configuration from the Agent Sim `.env` file."""
+    load_dotenv(ENV_FILE)
+
 
 class SimGenerator:
     """Generate a complete Agent Sim artifact set from trace JSONL files."""
@@ -39,24 +50,13 @@ class SimGenerator:
         if not conversations:
             raise ValueError(f"No conversation traces found in {self._traces_dir}")
         tasks, examples = self._build_tasks(conversations)
-        schema = self._ask_json(
-            "Generate SQLite DDL and normalized seed rows that semantically model these "
-            "tool definitions and observed tool responses. Do not create a generic tool "
-            "call replay table. Return JSON with schema_sql and seed_rows.",
-            {"tasks": tasks, "examples": examples},
-        )
-        tools = self._ask_json(
-            "Generate Python source for a semantic SQLite tool dispatcher. It must define "
-            "a Tools class whose __init__(db_path) stores the SQLite database path and whose "
-            "call(name, arguments) method uses parameterized SQLite queries, performs mutations "
-            "transactionally, and returns JSON-compatible values. Return JSON with tools_code only.",
-            {"tool_definitions": self._tool_definitions(tasks), "schema": schema},
-        )
+        schema, tools = self._generate_semantic_artifacts(tasks, examples)
         for task in tasks:
             response = self._ask_json(
                 "Generate deterministic Python code defining grade(initial_db_path, "
                 "final_db_path, task) that returns {'reward': float, 'reason': str}. "
-                "Grade the final database state needed to solve this task.",
+                "Grade the final database state needed to solve this task. Return JSON "
+                "with code only.",
                 {"task": task},
             )
             task["final_state_code_grader"] = self._required_string(response, "code")
@@ -68,6 +68,77 @@ class SimGenerator:
             {"system_prompts": sorted({task["system_prompt"] for task in tasks})},
         )
         self._publish(tasks, examples, schema, tools, policy)
+
+    def _generate_semantic_artifacts(
+        self,
+        tasks: list[dict[str, Any]],
+        examples: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Generate a store and dispatcher, repairing incomplete LLM output."""
+        validation_error: str | None = None
+        for attempt in range(1, MAX_SEMANTIC_GENERATION_ATTEMPTS + 1):
+            repair = (
+                " A previous generated store/dispatcher failed replay validation. "
+                f"Fix every listed discrepancy:\n{validation_error}"
+                if validation_error
+                else ""
+            )
+            schema = self._ask_json(
+                "Generate complete SQLite DDL and normalized seed rows that semantically "
+                "model all tool definitions and every field of every observed response. "
+                "Preserve nested objects and arrays losslessly using normalized tables or "
+                "JSON columns. Include all entities, child rows, options, fulfillments, and "
+                "history records needed to reproduce every example independently from the "
+                "initial database. Do not create a generic tool-call replay table. Return "
+                "exactly one JSON object with a string schema_sql and a seed_rows list; each "
+                f"seed row must have table and values keys.{repair}",
+                {
+                    "tool_definitions": self._tool_definitions(tasks),
+                    "examples": examples,
+                },
+            )
+            tools = self._ask_json(
+                "Generate Python source for a semantic SQLite tool dispatcher. It must define "
+                "a Tools class whose __init__(db_path) stores the SQLite database path and whose "
+                "call(name, arguments) method uses parameterized SQLite queries, performs "
+                "mutations transactionally, decodes any JSON columns, and returns JSON-compatible "
+                "values with exactly the same shape, field presence, ordering, and scalar types "
+                "as every observed response. Return JSON with tools_code only."
+                f"{repair}",
+                {
+                    "tool_definitions": self._tool_definitions(tasks),
+                    "schema": schema,
+                    "examples": examples,
+                },
+            )
+            try:
+                self._validate_semantic_generation(schema, tools, examples)
+            except (ValueError, sqlite3.Error, SyntaxError) as error:
+                validation_error = str(error)
+                if attempt == MAX_SEMANTIC_GENERATION_ATTEMPTS:
+                    raise ValueError(
+                        "Could not generate replay-compatible semantic artifacts after "
+                        f"{attempt} attempts: {validation_error}"
+                    ) from error
+                continue
+            return schema, tools
+        raise AssertionError("semantic generation attempts were not executed")
+
+    def _validate_semantic_generation(
+        self,
+        schema: dict[str, Any],
+        tools: dict[str, Any],
+        examples: list[dict[str, Any]],
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="agent-sim-validation-") as temp_dir:
+            root = Path(temp_dir)
+            (root / "data").mkdir()
+            (root / "server").mkdir()
+            self._create_store(root / "data" / "store.db", schema)
+            tools_code = self._required_string(tools, "tools_code")
+            self._validate_python(tools_code, "Tools")
+            (root / "server" / "tools.py").write_text(tools_code, encoding="utf-8")
+            self._validate_tool_examples(root, examples)
 
     def _load_conversations(self) -> dict[str, list[dict[str, Any]]]:
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -248,11 +319,14 @@ class SimGenerator:
         tasks: list[dict[str, Any]],
         examples: list[dict[str, Any]],
     ) -> None:
+        self._validate_tool_examples(root, examples)
+        for task in tasks:
+            self._validate_python(task["final_state_code_grader"], "grade")
+
+    def _validate_tool_examples(
+        self, root: Path, examples: list[dict[str, Any]]
+    ) -> None:
         tools_path = root / "server" / "tools.py"
-        namespace: dict[str, Any] = {}
-        exec(tools_path.read_text(encoding="utf-8"), namespace)  # noqa: S102 - generated validation
-        if not callable(namespace.get("Tools")):
-            raise ValueError("generated tools.py must define a Tools class")
         for example in examples:
             temporary_store = root / "validation.db"
             self._copy_database(root / "data" / "store.db", temporary_store)
@@ -266,13 +340,53 @@ class SimGenerator:
                 )
             finally:
                 temporary_store.unlink(missing_ok=True)
-            if actual != example["response"]:
+            differences = self._response_differences(example["response"], actual)
+            if differences:
                 raise ValueError(
                     "generated tools do not reproduce the observed response for "
-                    f"{call['tool_name']}: expected {example['response']!r}, got {actual!r}"
+                    f"{call['tool_name']}: " + "; ".join(differences)
                 )
-        for task in tasks:
-            self._validate_python(task["final_state_code_grader"], "grade")
+
+    @classmethod
+    def _response_differences(
+        cls, expected: Any, actual: Any, path: str = "$"
+    ) -> list[str]:
+        """Return concise, actionable differences between two JSON values."""
+        differences: list[str] = []
+        if type(expected) is not type(actual):
+            return [
+                f"{path} expected {type(expected).__name__} {expected!r}, "
+                f"got {type(actual).__name__} {actual!r}"
+            ]
+        if isinstance(expected, dict):
+            for key in expected.keys() - actual.keys():
+                differences.append(
+                    f"{path}.{key} is missing; expected {expected[key]!r}"
+                )
+            for key in actual.keys() - expected.keys():
+                differences.append(f"{path}.{key} is unexpected")
+            for key in expected.keys() & actual.keys():
+                differences.extend(
+                    cls._response_differences(
+                        expected[key], actual[key], f"{path}.{key}"
+                    )
+                )
+        elif isinstance(expected, list):
+            if len(expected) != len(actual):
+                differences.append(
+                    f"{path} expected {len(expected)} items, got {len(actual)}"
+                )
+            for index, (expected_item, actual_item) in enumerate(zip(expected, actual)):
+                differences.extend(
+                    cls._response_differences(
+                        expected_item, actual_item, f"{path}[{index}]"
+                    )
+                )
+        elif isinstance(expected, float) and abs(expected - actual) <= 1e-9:
+            pass
+        elif expected != actual:
+            differences.append(f"{path} expected {expected!r}, got {actual!r}")
+        return differences[:100]
 
     @staticmethod
     def _copy_database(source: Path, target: Path) -> None:
@@ -370,6 +484,9 @@ GENERATED_POLICY_CODE = {code!r}
 class PolicyGrader:
     """Run the generated global policy checker."""
 
+    def __init__(self, code: str = GENERATED_POLICY_CODE) -> None:
+        self._code = code
+
     def grade(
         self,
         *,
@@ -379,7 +496,7 @@ class PolicyGrader:
         latest_tool_result: Any,
     ) -> GradeResult:
         return execute_code(
-            code=GENERATED_POLICY_CODE,
+            code=self._code,
             function_name="grade",
             arguments={{
                 "system_prompt": system_prompt,
@@ -451,7 +568,15 @@ class PolicyGrader:
 
     @staticmethod
     def _tool_definitions(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [definition for task in tasks for definition in task["tool_definitions"]]
+        definitions: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for task in tasks:
+            for definition in task["tool_definitions"]:
+                key = json.dumps(definition, sort_keys=True)
+                if key not in seen:
+                    seen.add(key)
+                    definitions.append(definition)
+        return definitions
 
 
 def main() -> None:
@@ -460,12 +585,14 @@ def main() -> None:
     parser.add_argument("--traces-dir", type=Path, default=Path("traces"))
     parser.add_argument("--output-dir", type=Path, default=Path("."))
     arguments = parser.parse_args()
+    load_generator_env()
+
     from openai import AzureOpenAI
 
     client = AzureOpenAI(
         azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
         api_key=os.environ["AZURE_OPENAI_API_KEY"],
-        api_version=os.environ["AZURE_OPENAI_API_VERSION"],
+        api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2025-03-01-preview"),
     )
     SimGenerator(
         traces_dir=arguments.traces_dir,
